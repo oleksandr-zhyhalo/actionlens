@@ -1,0 +1,192 @@
+name: Debug Playground (Intentionally Failing)
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_ENV: ci
+  PIP_CACHE_DIR: .pip-cache
+  NODE_OPTIONS: --max-old-space-size=1024
+
+jobs:
+  build-test:
+    name: build-test (node ${{ matrix.node }} / py ${{ matrix.python }})
+    runs-on: ubuntu-latest
+
+    # Multiple variations to make it "bigger" and noisier for debugging
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20]
+        python: ["3.10", "3.11"]
+
+    # Spin up a DB to create more moving parts (logs, waits, health checks)
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner
+          POSTGRES_DB: appdb
+        ports:
+          - 5432:5432
+        # Provide health checks so the job can wait properly
+        options: >-
+          --health-cmd="pg_isready -U runner -d appdb"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - name: 🧾 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📦 Set up Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 🐍 Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: 🧰 Show tool versions
+        run: |
+          echo "::group::versions"
+          node -v
+          npm -v
+          python --version
+          pip --version
+          psql --version || true
+          echo "::endgroup::"
+
+      - name: ♻️ Cache pip (explicit cache dir for extra noise)
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-${{ matrix.python }}-
+            pip-${{ runner.os }}-
+
+      - name: 🧪 Install JS deps (if package.json exists)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          elif [ -f package.json ]; then
+            npm i
+          else
+            echo "No package.json found, skipping JS install."
+          fi
+
+      - name: 🧪 Install Python deps (if requirements exist)
+        run: |
+          mkdir -p "$PIP_CACHE_DIR"
+          if [ -f requirements.txt ]; then
+            pip install --cache-dir "$PIP_CACHE_DIR" -r requirements.txt
+          else
+            echo "No requirements.txt found, installing a few debug helpers."
+            pip install --cache-dir "$PIP_CACHE_DIR" pytest requests
+          fi
+
+      - name: ⏳ Wait for Postgres to be ready
+        env:
+          PGPASSWORD: runner
+        run: |
+          echo "Waiting for Postgres health..."
+          for i in {1..30}; do
+            if pg_isready -h localhost -p 5432 -U runner -d appdb; then
+              echo "Postgres is ready."
+              break
+            fi
+            echo "Not ready yet ($i)..."
+            sleep 2
+          done
+
+      - name: 🗄️ Run a tiny DB smoke
+        env:
+          PGPASSWORD: runner
+        run: |
+          echo "Creating a table and inserting a row..."
+          psql -h localhost -U runner -d appdb -c "CREATE TABLE IF NOT EXISTS widgets(id serial primary key, name text);"
+          psql -h localhost -U runner -d appdb -c "INSERT INTO widgets(name) VALUES ('foo');"
+          echo "Querying rows..."
+          psql -h localhost -U runner -d appdb -c "SELECT * FROM widgets;"
+
+      - name: 🧪 Run JS tests if present (non-fatal)
+        continue-on-error: true
+        run: |
+          if [ -f package.json ]; then
+            echo "::group::npm test output"
+            npm test --silent || echo "npm tests failed (allowed)"
+            echo "::endgroup::"
+          else
+            echo "No JS tests to run."
+          fi
+
+      - name: 🧪 Run Python tests if present (non-fatal)
+        continue-on-error: true
+        run: |
+          if [ -d tests ] || ls -1 *.py 2>/dev/null | grep -q .; then
+            echo "::group::pytest output"
+            pytest -q || echo "pytest failed (allowed)"
+            echo "::endgroup::"
+          else
+            echo "No Python tests to run."
+          fi
+
+      - name: 🧪 Produce diagnostic files
+        run: |
+          mkdir -p diagnostics
+          echo "Matrix: node=${{ matrix.node }}, py=${{ matrix.python }}" > diagnostics/matrix.txt
+          echo "Runner: $RUNNER_OS  /  $(uname -a)" > diagnostics/runner.txt
+          echo "Env dump:" > diagnostics/env.txt
+          env | sort >> diagnostics/env.txt
+          echo "DB check:" > diagnostics/db.txt
+          PGPASSWORD=runner psql -h localhost -U runner -d appdb -c "SELECT COUNT(*) FROM widgets;" >> diagnostics/db.txt 2>&1 || true
+
+      - name: 📤 Upload diagnostics (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-node${{ matrix.node }}-py${{ matrix.python }}
+          path: diagnostics
+
+      # -------------- INTENTIONAL FAILURE --------------
+      - name: ❌ Check required secret (INTENTIONAL FAILURE)
+        shell: bash
+        run: |
+          echo "::group::secret check"
+          # This fails unless you define the repository/org secret: REQUIRED_SECRET
+          if [ -z "${{ secrets.REQUIRED_SECRET }}" ]; then
+            echo "Missing REQUIRED_SECRET. Failing intentionally for debugging."
+            exit 42
+          fi
+          echo "Secret is present (you can remove this step to stop failing)."
+          echo "::endgroup::"
+
+      # These still run and upload logs even after failure due to if: always()
+      - name: 🧹 Post-mortem
+        if: always()
+        run: |
+          mkdir -p postmortem
+          dmesg | tail -n 200 > postmortem/dmesg_tail.txt 2>&1 || true
+          journalctl --no-pager -n 300 > postmortem/journal_tail.txt 2>&1 || true
+          docker ps -a > postmortem/docker_ps.txt 2>&1 || true
+          docker logs $(docker ps -aq) > postmortem/docker_logs.txt 2>&1 || true
+
+      - name: 📤 Upload post-mortem bundle (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postmortem-node${{ matrix.node }}-py${{ matrix.python }}
+          path: postmortem
