@@ -1,4 +1,4 @@
-name: Debug Playground (Intentionally Failing)
+name: Debug Playground (Intentionally Failing, Single Job)
 
 on:
   push:
@@ -16,17 +16,9 @@ env:
 
 jobs:
   build-test:
-    name: build-test (node ${{ matrix.node }} / py ${{ matrix.python }})
+    name: build-test (single job)
     runs-on: ubuntu-latest
 
-    # Multiple variations to make it "bigger" and noisier for debugging
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [18, 20]
-        python: ["3.10", "3.11"]
-
-    # Spin up a DB to create more moving parts (logs, waits, health checks)
     services:
       postgres:
         image: postgres:16-alpine
@@ -36,7 +28,6 @@ jobs:
           POSTGRES_DB: appdb
         ports:
           - 5432:5432
-        # Provide health checks so the job can wait properly
         options: >-
           --health-cmd="pg_isready -U runner -d appdb"
           --health-interval=5s
@@ -47,16 +38,16 @@ jobs:
       - name: 🧾 Checkout
         uses: actions/checkout@v4
 
-      - name: 📦 Set up Node ${{ matrix.node }}
+      - name: 📦 Set up Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 20
           cache: npm
 
-      - name: 🐍 Set up Python ${{ matrix.python }}
+      - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.11"
           cache: pip
 
       - name: 🧰 Show tool versions
@@ -69,13 +60,13 @@ jobs:
           psql --version || true
           echo "::endgroup::"
 
-      - name: ♻️ Cache pip (explicit cache dir for extra noise)
+      - name: ♻️ Cache pip
         uses: actions/cache@v4
         with:
           path: ${{ env.PIP_CACHE_DIR }}
-          key: pip-${{ runner.os }}-${{ matrix.python }}-${{ hashFiles('**/requirements*.txt') }}
+          key: pip-${{ runner.os }}-py311-${{ hashFiles('**/requirements*.txt') }}
           restore-keys: |
-            pip-${{ runner.os }}-${{ matrix.python }}-
+            pip-${{ runner.os }}-py311-
             pip-${{ runner.os }}-
 
       - name: 🧪 Install JS deps (if package.json exists)
@@ -147,7 +138,6 @@ jobs:
       - name: 🧪 Produce diagnostic files
         run: |
           mkdir -p diagnostics
-          echo "Matrix: node=${{ matrix.node }}, py=${{ matrix.python }}" > diagnostics/matrix.txt
           echo "Runner: $RUNNER_OS  /  $(uname -a)" > diagnostics/runner.txt
           echo "Env dump:" > diagnostics/env.txt
           env | sort >> diagnostics/env.txt
@@ -158,7 +148,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostics-node${{ matrix.node }}-py${{ matrix.python }}
+          name: diagnostics
           path: diagnostics
 
       # -------------- INTENTIONAL FAILURE --------------
@@ -188,5 +178,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: postmortem-node${{ matrix.node }}-py${{ matrix.python }}
+          name: postmortem
           path: postmortem
