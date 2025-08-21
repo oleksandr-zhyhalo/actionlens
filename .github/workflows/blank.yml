@@ -1,4 +1,4 @@
-name: Debug Playground (Intentionally Failing, Single Job)
+name: Debug Playground
 
 on:
   push:
@@ -151,20 +151,17 @@ jobs:
           name: diagnostics
           path: diagnostics
 
-      # -------------- INTENTIONAL FAILURE --------------
-      - name: ❌ Check required secret (INTENTIONAL FAILURE)
+      - name: Check required secret
         shell: bash
         run: |
           echo "::group::secret check"
-          # This fails unless you define the repository/org secret: REQUIRED_SECRET
           if [ -z "${{ secrets.REQUIRED_SECRET }}" ]; then
-            echo "Missing REQUIRED_SECRET. Failing intentionally for debugging."
+            echo "Missing REQUIRED_SECRET"
             exit 42
           fi
-          echo "Secret is present (you can remove this step to stop failing)."
+          echo "Secret is present"
           echo "::endgroup::"
 
-      # These still run and upload logs even after failure due to if: always()
       - name: 🧹 Post-mortem
         if: always()
         run: |
